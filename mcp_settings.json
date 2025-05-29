@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "github.com/upstash/context7-mcp": {
+      "command": "npx",
+      "args": ["@upstash/context7-mcp"],
+      "cwd": "/Users/ryan-ios/Documents/Cline/MCP/context7-mcp",
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
