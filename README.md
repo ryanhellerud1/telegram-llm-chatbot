@@ -34,12 +34,12 @@ A flexible Telegram bot framework supporting multiple personalities (e.g., Kovu,
 
 5. **Run the bot** (specify which bot to run):
    ```sh
-   python general_bot.py --bot <botname>
+   python src/bot/telegram_bot.py --bot <botname>
    ```
-   - `<botname>` must match a key in `bots_config.json` (e.g., `kovubot`, `kenjibot`, `narlybot`).
+   - `<botname>` must match a key in `config/bots_config.json` (e.g., `kovubot`, `kenjibot`, `narlybot`).
    - Example:
      ```sh
-     python general_bot.py --bot kenjibot
+     python src/bot/telegram_bot.py --bot kenjibot
      ```
 
 ## Environment Variables
@@ -48,9 +48,9 @@ A flexible Telegram bot framework supporting multiple personalities (e.g., Kovu,
 - `OPENROUTER_API_KEY`: (Optional) Global fallback API key for OpenRouter.
 
 ## File Overview
-- `general_bot.py`: Main multi-bot logic, handlers, and LLM/image integration.
-- `bots_config.json`: Configuration for all supported bots/personalities.
-- `prompts/`: System prompt files for each bot.
+- `src/bot/telegram_bot.py`: Main multi-bot logic, handlers, and LLM/image integration.
+- `config/bots_config.json`: Configuration for all supported bots/personalities.
+- `src/prompts/`: System prompt files for each bot.
 - `requirements.txt`: Python dependencies.
 - `.env`: (Not committed) Your secrets for bot and API access.
 
