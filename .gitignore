@@ -47,3 +47,15 @@ mcp_settings.json
 # Ignore secrets or API keys if any other files are used
 secrets.json
 apikeys.json
+
+# Ignore all bot scripts except general_bot.py
+kenji_bot.py
+kenji_bot_class.py
+kovu_bot_llm.py
+kovu_bot_llm_copy.py
+kovu_bot.py
+kovubot.log
+narly.py
+kovu_bot_llm_copy.py
+# Do NOT ignore the general bot
+!general_bot.py
