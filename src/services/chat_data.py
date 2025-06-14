@@ -45,3 +45,7 @@ class ChatHistoryManager:
             if msg.get('role') == 'user' and msg.get('username'):
                 return msg.get('username')
         return None
+
+    def get_chat_data(self, chat_id: int) -> ChatData:
+        """Return the ChatData for a given chat_id, or None if not found."""
+        return self.chat_rooms.get(chat_id)

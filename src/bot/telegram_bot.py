@@ -21,23 +21,12 @@ import sys
 from src.services.llm_client import LLMClient
 from src.services.chat_data import ChatData, ChatHistoryManager
 from src.config.config import BotConfig, ConfigLoader
-from src.handlers.handlers import handle_start_command, handle_ask_command, handle_draw_command, handle_new_members, handle_text_messages
+from src.handlers.handlers import handle_start_command, handle_new_members, handle_text_messages
+from src.handlers.handlers import handle_ask_command, handle_draw_command
 from src.utils.helpers import get_username, is_user_replying_to_user
 
 
-@dataclass
-class BotConfig:
-    """Configuration data for the bot."""
-    name: str
-    bot_name_display: str
-    bot_username_internal: str
-    env_prefix: str
-    system_prompt_file: str
-    openrouter_model: str
-    welcome_message_template: str = "Welcome, {member_full_name}!"
-    telegram_bot_token: Optional[str] = None
-    openrouter_api_key: Optional[str] = None
-    system_prompt: Optional[str] = None
+# Removed duplicate BotConfig definition
 
 
 class TelegramBot:
@@ -67,6 +56,7 @@ class TelegramBot:
         self._instances.add(self)  # Add this instance to the set
         self.llm_client = None  # Will be initialized after config is loaded
         self.chat_history_manager = ChatHistoryManager(history_max_length=self.HISTORY_MAX_LENGTH)
+        self.periodic_jobs = {}  # Track periodic jobs per chat
 
     def setup_logging(self) -> None:
         """Configure logging for the bot."""
@@ -106,9 +96,9 @@ class TelegramBot:
             return False
         self.config = config
         
-        # Update system prompt path to new location
-        if not self.config.system_prompt_file.startswith("src/prompts"):
-            self.config.system_prompt_file = f"src/{self.config.system_prompt_file}"
+        # Use absolute path for system prompt
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        prompt_file_path = os.path.join(base_dir, self.config.system_prompt_file)
             
         return True
     
@@ -136,10 +126,12 @@ class TelegramBot:
     def load_system_prompt(self) -> bool:
         """Load system prompt from file."""
         prompt_file_path = self.config.system_prompt_file
-        
+
+        # Always resolve relative to project root
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         if not os.path.isabs(prompt_file_path):
-            prompt_file_path = os.path.join(os.path.dirname(__file__), prompt_file_path)
-        
+            prompt_file_path = os.path.join(project_root, prompt_file_path)
+
         try:
             with open(prompt_file_path, 'r', encoding='utf-8') as f:
                 self.config.system_prompt = f.read().strip()
@@ -166,7 +158,7 @@ class TelegramBot:
                         f"History length: {len(self.chat_history_manager.get_chat_data(chat_id).message_history)}")
     
     async def periodic_llm_callback(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Callback for periodic LLM responses."""
+        self.logger.info(f"[ChatID: {context.job.data['chat_id']}] periodic_llm_callback triggered (interval tick)")
         job = context.job
         chat_id = job.data['chat_id']
         
@@ -184,11 +176,14 @@ class TelegramBot:
             not any(response_text.startswith(prefix) for prefix in ["*error", "*system", "*critical"])):
             
             # Check if we should tag the last active user
-            last_user = get_username(chat_id)
-            if last_user and last_user != "Unknown":
-                # Only add @ tag if the response doesn't already contain it
-                if f"@{last_user}" not in response_text:
-                    response_text = f"@{last_user} {response_text}"
+            last_user = "Unknown"
+            if chat_data and hasattr(chat_data, 'message_history'):
+                for msg in reversed(chat_data.message_history):
+                    if msg.get("role") == "user" and msg.get("username"):
+                        last_user = msg["username"]
+                        break
+            if last_user != "Unknown" and not response_text.startswith(f"@{last_user}"):
+                response_text = f"@{last_user} {response_text}"
             
             # Log outgoing message content and length
             self.logger.info(f"[ChatID: {chat_id}] Outgoing periodic reply length: {len(response_text)} | Content: {repr(response_text)}")
@@ -227,7 +222,7 @@ class TelegramBot:
             CommandHandler("ask", lambda update, context: handle_ask_command(self, update, context)),
             CommandHandler("draw", lambda update, context: handle_draw_command(self, update, context)),
             MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, lambda update, context: handle_new_members(self, update, context)),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: handle_text_messages(self, update, context)),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_messages),  # Use class method directly
         ]
         for handler in handlers:
             self.application.add_handler(handler)
@@ -238,18 +233,22 @@ class TelegramBot:
         if isinstance(context.error, telegram_error.Conflict):
             self.logger.error("Another instance detected, attempting graceful shutdown...")
             try:
-                if self.application and hasattr(self.application, 'running') and self.application.running:
+                if self.application:
                     await self.application.stop()
+                    await self.application.shutdown()
             except Exception as e:
-                self.logger.error(f"Error during stop: {e}")
-            
-            self._instances.discard(self)
-            logging.shutdown()
-            os._exit(1)  # Force exit to avoid asyncio issues
+                self.logger.error(f"Error during shutdown: {e}")
+            finally:
+                self._instances.discard(self)
+                logging.shutdown()
+                os._exit(1)
             return
         
         # Log any other errors
-        self.logger.error("Exception while handling an update:", exc_info=context.error)
+        self.logger.error(
+            f"Exception while handling an update: {context.error}",
+            exc_info=True
+        )
     
     def initialize(self) -> bool:
         """Initialize the bot with all configurations."""
@@ -330,7 +329,49 @@ class TelegramBot:
             # Remove this instance from the tracked instances
             self._instances.discard(self)
 
-
+    async def handle_text_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle incoming text messages."""
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        username = update.effective_user.username if update.effective_user else "Unknown"
+        text = update.message.text if update.message else ""
+        self.logger.info(f"[ChatID: {chat_id}] Received text message from {username}: {text}")
+        if chat_id and user_id:
+            self.add_message_to_history(chat_id, "user", text, user_id, username)
+            # Schedule periodic job if not already scheduled
+            if chat_id not in self.periodic_jobs:
+                job = context.job_queue.run_repeating(
+                    self.periodic_llm_callback,
+                    interval=self.PERIODIC_JOB_INTERVAL_SECONDS,
+                    first=self.PERIODIC_JOB_FIRST_RUN_DELAY_SECONDS,
+                    data={"chat_id": chat_id},
+                    name=f"periodic_llm_{chat_id}"
+                )
+                self.periodic_jobs[chat_id] = job
+                self.logger.info(f"[ChatID: {chat_id}] Scheduled periodic LLM job.")
+        # Optionally, you can trigger a reply or further processing here
+    
+    def prepare_messages_for_llm(self, chat_id: int, include_introduction: bool = False) -> list:
+        """
+        Prepare the message history for the LLM, optionally including a system introduction.
+        Returns a list of dicts with 'role' and 'content'.
+        """
+        messages = []
+        if include_introduction and self.config and hasattr(self.config, 'system_prompt'):
+            messages.append({
+                "role": "system",
+                "content": self.config.system_prompt
+            })
+        chat_data = self.chat_history_manager.get_chat_data(chat_id)
+        if chat_data and hasattr(chat_data, 'message_history'):
+            for msg in chat_data.message_history:
+                # msg is a dict, not an object
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+        return messages
+    
 def signal_handler(sig, frame):
     print("Ctrl+C received, shutting down...", flush=True)
     sys.exit(0)
