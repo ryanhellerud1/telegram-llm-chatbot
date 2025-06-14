@@ -14,7 +14,7 @@ class LLMClient:
         self.ssl_context = ssl_context
         self.OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
         self.DEFAULT_MAX_TOKENS_ASK = 1000
-        self.DEFAULT_MAX_TOKENS_PERIODIC = 600
+        self.DEFAULT_MAX_TOKENS_PERIODIC = 400
         self.TIMEOUT_SECONDS = 30
         self.PERIODIC_TIMEOUT_SECONDS = 60
 
