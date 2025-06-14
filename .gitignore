@@ -57,5 +57,6 @@ kovu_bot.py
 kovubot.log
 narly.py
 kovu_bot_llm_copy.py
+general_bot_copy.py
 # Do NOT ignore the general bot
 !general_bot.py
