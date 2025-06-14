@@ -222,7 +222,7 @@ class TelegramBot:
             CommandHandler("ask", lambda update, context: handle_ask_command(self, update, context)),
             CommandHandler("draw", lambda update, context: handle_draw_command(self, update, context)),
             MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, lambda update, context: handle_new_members(self, update, context)),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_messages),  # Use class method directly
+            MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: handle_text_messages(self, update, context)),
         ]
         for handler in handlers:
             self.application.add_handler(handler)
@@ -329,28 +329,6 @@ class TelegramBot:
             # Remove this instance from the tracked instances
             self._instances.discard(self)
 
-    async def handle_text_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle incoming text messages."""
-        chat_id = update.effective_chat.id if update.effective_chat else None
-        user_id = update.effective_user.id if update.effective_user else None
-        username = update.effective_user.username if update.effective_user else "Unknown"
-        text = update.message.text if update.message else ""
-        self.logger.info(f"[ChatID: {chat_id}] Received text message from {username}: {text}")
-        if chat_id and user_id:
-            self.add_message_to_history(chat_id, "user", text, user_id, username)
-            # Schedule periodic job if not already scheduled
-            if chat_id not in self.periodic_jobs:
-                job = context.job_queue.run_repeating(
-                    self.periodic_llm_callback,
-                    interval=self.PERIODIC_JOB_INTERVAL_SECONDS,
-                    first=self.PERIODIC_JOB_FIRST_RUN_DELAY_SECONDS,
-                    data={"chat_id": chat_id},
-                    name=f"periodic_llm_{chat_id}"
-                )
-                self.periodic_jobs[chat_id] = job
-                self.logger.info(f"[ChatID: {chat_id}] Scheduled periodic LLM job.")
-        # Optionally, you can trigger a reply or further processing here
-    
     def prepare_messages_for_llm(self, chat_id: int, include_introduction: bool = False) -> list:
         """
         Prepare the message history for the LLM, optionally including a system introduction.

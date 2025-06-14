@@ -31,4 +31,15 @@ async def handle_text_messages(bot: Any, update: Update, context: ContextTypes.D
     bot.logger.info(f"[ChatID: {chat_id}] Received text message from {username}: {text}")
     if chat_id and user_id:
         bot.add_message_to_history(chat_id, "user", text, user_id, username)
+        # Schedule periodic job if not already scheduled
+        if hasattr(bot, 'periodic_jobs') and chat_id not in bot.periodic_jobs:
+            job = context.job_queue.run_repeating(
+                bot.periodic_llm_callback,
+                interval=bot.PERIODIC_JOB_INTERVAL_SECONDS,
+                first=bot.PERIODIC_JOB_FIRST_RUN_DELAY_SECONDS,
+                data={"chat_id": chat_id},
+                name=f"periodic_llm_{chat_id}"
+            )
+            bot.periodic_jobs[chat_id] = job
+            bot.logger.info(f"[ChatID: {chat_id}] Scheduled periodic LLM job.")
     # Optionally, you can trigger a reply or further processing here
