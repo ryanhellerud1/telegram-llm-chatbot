@@ -1,6 +1,6 @@
 {
   "kovubot": {
-    "system_prompt_file": "prompts/kovu_system_prompt.txt",
+    "system_prompt_file": "src/prompts/kovu_system_prompt.txt",
     "env_prefix": "KOVU_",
     "bot_name_display": "KovuBot",
     "bot_username_internal": "kovuaibot",
@@ -8,7 +8,7 @@
     "welcome_message_template": "Welcome to the Kovu AI CTO, {member_full_name}! Glad to have you here."
   },
   "kenjibot": {
-    "system_prompt_file": "prompts/kenji_system_prompt.txt",
+    "system_prompt_file": "src/prompts/kenji_system_prompt.txt",
     "env_prefix": "KENJI_",
     "bot_name_display": "KenjiBot",
     "bot_username_internal": "kenjiaibot",
@@ -16,7 +16,7 @@
     "welcome_message_template": "Greetings, {member_full_name}. I am Kenji, your guide in this digital realm. Welcome."
   },
    "narlybot": {
-    "system_prompt_file": "prompts/narly_system_prompt.txt",
+    "system_prompt_file": "src/prompts/narly_system_prompt.txt",
     "env_prefix": "NARLY_",
     "bot_name_display": "NarlyBot",
     "bot_username_internal": "narlyaibot",

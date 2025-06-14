@@ -1,0 +1,62 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+env/
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# VS Code settings
+.vscode/
+
+# macOS system files
+.DS_Store
+
+# Log files
+*.log
+
+# Python egg files
+*.egg
+*.egg-info/
+dist/
+build/
+
+# PyInstaller
+*.spec
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Test output
+htmlcov/
+.coverage
+.tox/
+.nox/
+.cache/
+.pytest_cache/
+debug_output.txt
+
+# Local config
+mcp_settings.json
+
+# Ignore secrets or API keys if any other files are used
+secrets.json
+apikeys.json
+
+# Ignore all bot scripts except general_bot.py
+kenji_bot.py
+kenji_bot_class.py
+kovu_bot_llm.py
+kovu_bot_llm_copy.py
+kovu_bot.py
+kovubot.log
+narly.py
+kovu_bot_llm_copy.py
+general_bot_copy.py
+# Do NOT ignore the general bot
+!general_bot.py
