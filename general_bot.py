@@ -1,7 +1,7 @@
 import aiohttp
 import ssl
 import certifi
-from telegram import Update
+from telegram import Update, error as telegram_error
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, JobQueue
 from dotenv import load_dotenv
 import logging
@@ -11,8 +11,13 @@ import asyncio
 import argparse
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import async_timeout
+from asyncio import Lock
 from datetime import datetime
 import weakref
+import signal
+import sys
 
 
 @dataclass
@@ -53,7 +58,9 @@ class TelegramBot:
     HISTORY_MAX_LENGTH = 20
     PERIODIC_JOB_INTERVAL_SECONDS = 30
     PERIODIC_JOB_FIRST_RUN_DELAY_SECONDS = 5
-    
+    _running = False  # Class variable to track running state
+    _instances = weakref.WeakSet()  # Keep track of bot instances
+
     def __init__(self, bot_name: str):
         """Initialize the bot with configuration."""
         self.bot_name = bot_name
@@ -62,16 +69,33 @@ class TelegramBot:
         self.application: Optional[Application] = None
         self.logger = logging.getLogger(f"{bot_name}")
         self._ssl_context = ssl.create_default_context(cafile=certifi.where())
-        
+        self._instances.add(self)  # Add this instance to the set
+
     def setup_logging(self) -> None:
         """Configure logging for the bot."""
         log_level_str = os.getenv(f"{self.config.env_prefix}LOG_LEVEL", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
         
-        logging.basicConfig(
-            format=f'%(asctime)s - [{self.config.bot_name_display}] - %(levelname)s - %(message)s',
-            level=log_level
+        # Get the root logger and set its level
+        root_logger = logging.getLogger()
+        root_logger.setLevel(log_level)
+        
+        # Create a formatter
+        formatter = logging.Formatter(
+            f'%(asctime)s - [{self.config.bot_name_display}] - %(levelname)s - %(message)s'
         )
+        
+        # Create a console handler if one doesn't exist
+        console_handler = None
+        for handler in root_logger.handlers:
+            if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
+                console_handler = handler
+                break
+        
+        if not console_handler:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setFormatter(formatter)
+            root_logger.addHandler(console_handler)
         
         # Suppress verbose library logging
         logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -176,12 +200,28 @@ class TelegramBot:
         self.logger.info(f"[ChatID: {chat_id}] Message added (role: {role}, reply_to_user: {is_reply_to_user}). "
                         f"History length: {len(chat_data.message_history)}")
     
-    async def get_llm_response(self, chat_id: int, messages: List[Dict], 
+    async def check_network_health(self) -> bool:
+        """Check basic network connectivity to OpenRouter."""
+        try:
+            async with async_timeout.timeout(5):
+                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=self._ssl_context)) as session:
+                    async with session.get("https://openrouter.ai/api/v1/auth/check"):
+                        return True
+        except Exception as e:
+            self.logger.warning(f"Network health check failed: {str(e)}")
+            return False
+    
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def get_llm_response(self, chat_id: int, messages: List[Dict],
                              for_periodic_job: bool = False) -> str:
-        """Get response from LLM API."""
+        """Get response from LLM API with network resilience."""
         if not self.config.openrouter_api_key:
             self.logger.error(f"[ChatID: {chat_id}] OpenRouter API Key not configured.")
             return "*error beep* My API key is not set up!"
+
+        if not await self.check_network_health():
+            self.logger.warning(f"[ChatID: {chat_id}] Network health check failed - skipping LLM call")
+            return "*static* My connection is unstable... try again soon."
         
         headers = {
             "Content-Type": "application/json",
@@ -597,10 +637,13 @@ class TelegramBot:
         if not self.application:
             raise RuntimeError("Application not initialized")
         
+        # Add error handler for Conflict errors
+        self.application.add_error_handler(self._handle_error)
+        
         handlers = [
             CommandHandler("start", self.handle_start_command),
             CommandHandler("ask", self.handle_ask_command),
-            CommandHandler("draw", self.handle_draw_command),  # <-- Added draw handler
+            CommandHandler("draw", self.handle_draw_command),
             MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, self.handle_new_members),
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_messages),
         ]
@@ -609,6 +652,24 @@ class TelegramBot:
             self.application.add_handler(handler)
         
         self.logger.info("Message handlers registered")
+
+    async def _handle_error(self, update: Optional[object], context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle errors in the bot."""
+        if isinstance(context.error, telegram_error.Conflict):
+            self.logger.error("Another instance detected, attempting graceful shutdown...")
+            try:
+                if self.application and hasattr(self.application, 'running') and self.application.running:
+                    await self.application.stop()
+            except Exception as e:
+                self.logger.error(f"Error during stop: {e}")
+            
+            self._instances.discard(self)
+            logging.shutdown()
+            os._exit(1)  # Force exit to avoid asyncio issues
+            return
+        
+        # Log any other errors
+        self.logger.error("Exception while handling an update:", exc_info=context.error)
     
     def initialize(self) -> bool:
         """Initialize the bot with all configurations."""
@@ -634,39 +695,97 @@ class TelegramBot:
         self.logger.info(f"Bot '{self.config.bot_name_display}' initialized successfully")
         return True
     
+    async def _check_telegram_api(self) -> bool:
+        """Check if we can connect to Telegram API before starting."""
+        try:
+            connector = aiohttp.TCPConnector(ssl=self._ssl_context)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(
+                    f"https://api.telegram.org/bot{self.config.telegram_bot_token}/getMe",
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as response:
+                    if response.status == 409:
+                        return False
+                    response.raise_for_status()
+                    return True
+        except Exception as e:
+            self.logger.warning(f"API check failed: {e}")
+            return False
+
     def run(self) -> None:
         """Run the bot."""
         if not self.application:
             self.logger.critical("Bot not properly initialized")
             return
-        
+
         self.logger.info(f"Starting bot polling for {self.config.bot_name_display}...")
         try:
-            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+            # Clear any pending updates and start fresh
+            self.application.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+                close_loop=False  # Don't close the loop to avoid asyncio errors
+            )
         except KeyboardInterrupt:
             self.logger.info("Bot stopped by user")
         except Exception as e:
             self.logger.critical(f"Bot polling failed: {e}", exc_info=True)
         finally:
             self.logger.info("Bot polling stopped")
+            try:
+                if self.application and self.application.running:
+                    self.application.stop_running()
+                    self.application.shutdown()
+            except Exception as e:
+                self.logger.error(f"Error during shutdown: {e}")
+            # Remove this instance from the tracked instances
+            self._instances.discard(self)
 
+
+def signal_handler(sig, frame):
+    print("Ctrl+C received, shutting down...", flush=True)
+    sys.exit(0)
 
 def main():
     """Main entry point."""
+    # Set up logging to output to console
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    logger = logging.getLogger("MainProcess")
+    
+    logger.info("Starting bot initialization...")
+    
     parser = argparse.ArgumentParser(description="Run a Telegram Bot with specific personality.")
     parser.add_argument("--bot", required=True, 
                        help="Bot name (must match key in bots_config.json)")
     args = parser.parse_args()
     
+    logger.info(f"Initializing bot: {args.bot}")
     bot = TelegramBot(args.bot)
     
     if not bot.initialize():
-        print(f"Failed to initialize bot '{args.bot}'", flush=True)
+        logger.critical(f"Failed to initialize bot '{args.bot}'")
         return 1
     
-    bot.run()
+    logger.info("Bot initialization successful, starting...")
+    
+    try:
+        bot.run()
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt")
+    except Exception as e:
+        logger.critical(f"Error: {e}", exc_info=True)
+    finally:
+        logger.info("Bot shutting down...")
+    
     return 0
 
-
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())
