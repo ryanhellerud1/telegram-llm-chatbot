@@ -21,7 +21,9 @@ class ConfigLoader:
     @staticmethod
     def load_config(bot_name: str, logger=None) -> Optional[BotConfig]:
         try:
-            config_path = os.path.join(os.path.dirname(__file__), "bots_config.json")
+            # Path to config file in top-level config directory
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            config_path = os.path.join(base_dir, 'config', 'bots_config.json')
             with open(config_path, 'r') as f:
                 all_configs = json.load(f)
             if bot_name not in all_configs:
@@ -33,7 +35,7 @@ class ConfigLoader:
             return BotConfig(**config_data)
         except FileNotFoundError:
             if logger:
-                logger.critical("bots_config.json not found.")
+                logger.critical(f"bots_config.json not found at: {config_path}")
             return None
         except json.JSONDecodeError:
             if logger:

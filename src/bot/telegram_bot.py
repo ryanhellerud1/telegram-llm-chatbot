@@ -18,11 +18,11 @@ from datetime import datetime
 import weakref
 import signal
 import sys
-from llm_client import LLMClient
-from chat_data import ChatData, ChatHistoryManager
-from config import BotConfig, ConfigLoader
-from handlers import handle_start_command, handle_ask_command, handle_draw_command, handle_new_members, handle_text_messages
-from utils import get_username, is_user_replying_to_user
+from src.services.llm_client import LLMClient
+from src.services.chat_data import ChatData, ChatHistoryManager
+from src.config.config import BotConfig, ConfigLoader
+from src.handlers.handlers import handle_start_command, handle_ask_command, handle_draw_command, handle_new_members, handle_text_messages
+from src.utils.helpers import get_username, is_user_replying_to_user
 
 
 @dataclass
@@ -105,6 +105,11 @@ class TelegramBot:
         if not config:
             return False
         self.config = config
+        
+        # Update system prompt path to new location
+        if not self.config.system_prompt_file.startswith("src/prompts"):
+            self.config.system_prompt_file = f"src/{self.config.system_prompt_file}"
+            
         return True
     
     def load_environment_variables(self) -> bool:
@@ -348,7 +353,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="Run a Telegram Bot with specific personality.")
     parser.add_argument("--bot", required=True, 
-                       help="Bot name (must match key in bots_config.json)")
+                       help="Bot name (must match key in config/bots_config.json)")
     args = parser.parse_args()
     
     logger.info(f"Initializing bot: {args.bot}")
@@ -359,6 +364,11 @@ def main():
         return 1
     
     logger.info("Bot initialization successful, starting...")
+    
+    # Change working directory to project root
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(project_root)
+    logger.info(f"Changed working directory to project root: {project_root}")
     
     try:
         bot.run()
