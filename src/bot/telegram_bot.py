@@ -18,11 +18,17 @@ from datetime import datetime
 import weakref
 import signal
 import sys
+
+# Add project root to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from src.services.llm_client import LLMClient
 from src.services.chat_data import ChatData, ChatHistoryManager
 from src.config.config import BotConfig, ConfigLoader
 from src.handlers.handlers import handle_start_command, handle_new_members, handle_text_messages
-from src.handlers.handlers import handle_ask_command, handle_draw_command
+from src.handlers.handlers import handle_draw_command
 from src.utils.helpers import get_username, is_user_replying_to_user
 
 
@@ -169,21 +175,28 @@ class TelegramBot:
             self.logger.info(f"[ChatID: {chat_id}] No new activity - skipping LLM call")
             return
         
+        # Check if an immediate response is currently in progress
+        if hasattr(chat_data, 'immediate_response_in_progress') and chat_data.immediate_response_in_progress:
+            self.logger.info(f"[ChatID: {chat_id}] Immediate response in progress - skipping periodic response")
+            return
+        
+        # Check if we should skip this periodic response due to recent bot activity
+        if self._should_skip_periodic_response(chat_data):
+            self.logger.info(f"[ChatID: {chat_id}] Skipping periodic response due to recent bot activity")
+            return
+        
         messages = self.prepare_messages_for_llm(chat_id, include_introduction=True)
         response_text = await self.llm_client.get_llm_response(chat_id, messages, for_periodic_job=True)
         
         if (response_text and 
             not any(response_text.startswith(prefix) for prefix in ["*error", "*system", "*critical"])):
             
-            # Check if we should tag the last active user
-            last_user = "Unknown"
-            if chat_data and hasattr(chat_data, 'message_history'):
-                for msg in reversed(chat_data.message_history):
-                    if msg.get("role") == "user" and msg.get("username"):
-                        last_user = msg["username"]
-                        break
-            if last_user != "Unknown" and not response_text.startswith(f"@{last_user}"):
-                response_text = f"@{last_user} {response_text}"
+            # Only add @mentions for periodic responses in group chats and only sometimes
+            should_add_mention = self._should_add_mention_to_periodic_response(chat_id, chat_data)
+            if should_add_mention:
+                last_user = self._get_last_active_user_for_mention(chat_data)
+                if last_user and not response_text.startswith(f"@{last_user}"):
+                    response_text = f"@{last_user} {response_text}"
             
             # Log outgoing message content and length
             self.logger.info(f"[ChatID: {chat_id}] Outgoing periodic reply length: {len(response_text)} | Content: {repr(response_text)}")
@@ -206,6 +219,7 @@ class TelegramBot:
                 username=self.config.bot_username_internal
             )
             chat_data.new_activity_flag = False
+            chat_data.last_bot_response_time = datetime.now()
             self.logger.info(f"[ChatID: {chat_id}] Sent periodic response and reset activity flag")
         elif response_text:
             self.logger.warning(f"[ChatID: {chat_id}] Periodic LLM returned error: {response_text}")
@@ -219,7 +233,6 @@ class TelegramBot:
         self.application.add_error_handler(self._handle_error)
         handlers = [
             CommandHandler("start", lambda update, context: handle_start_command(self, update, context)),
-            CommandHandler("ask", lambda update, context: handle_ask_command(self, update, context)),
             CommandHandler("draw", lambda update, context: handle_draw_command(self, update, context)),
             MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, lambda update, context: handle_new_members(self, update, context)),
             MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: handle_text_messages(self, update, context)),
@@ -349,6 +362,264 @@ class TelegramBot:
                     "content": msg["content"]
                 })
         return messages
+    
+    def _is_bot_mentioned_in_text(self, text: str) -> bool:
+        """
+        Check if the bot is mentioned in the text by name.
+        Handles both full bot names (e.g., "kenjibot") and short names (e.g., "kenji").
+        """
+        if not self.config or not text:
+            return False
+        
+        text_lower = text.lower()
+        bot_name_display = self.config.bot_name_display.lower() if self.config.bot_name_display else ""
+        bot_username = self.config.bot_username_internal.lower() if self.config.bot_username_internal else ""
+        
+        # Check for @username mentions
+        if bot_username and f"@{bot_username}" in text_lower:
+            return True
+        
+        # Check for full bot name (e.g., "kenjibot")
+        if bot_name_display and bot_name_display in text_lower:
+            return True
+        
+        # Check for short bot name (e.g., "kenji" from "kenjibot")
+        if bot_name_display:
+            # Extract the base name by removing "bot" suffix if present
+            base_name = bot_name_display
+            if base_name.endswith("bot"):
+                base_name = base_name[:-3]  # Remove "bot" suffix
+            
+            # Check if the base name is mentioned as a whole word
+            if base_name and len(base_name) >= 3:  # Avoid matching very short names
+                # Use word boundaries to avoid partial matches within other words
+                import re
+                pattern = r'\b' + re.escape(base_name) + r'\b'
+                if re.search(pattern, text_lower):
+                    return True
+        
+        return False
+
+    async def should_respond_immediately(self, update: Update, text: str) -> bool:
+        """
+        Determine if the bot should respond immediately to a message.
+        Returns True if the bot should respond right away.
+        """
+        if not update.message or not text:
+            return False
+        
+        # Get bot username for mention detection
+        bot_username = self.config.bot_username_internal if self.config else None
+        
+        # Check if message is a reply to the bot
+        if update.message.reply_to_message:
+            replied_to_user = update.message.reply_to_message.from_user
+            if replied_to_user and replied_to_user.username == bot_username:
+                self.logger.info(f"Message is a reply to bot - triggering immediate response")
+                return True
+        
+        # Check if bot is mentioned by @username
+        if bot_username and f"@{bot_username}" in text.lower():
+            self.logger.info(f"Bot mentioned by @username - triggering immediate response")
+            return True
+        
+        # Check if message contains question words and is directed at bot
+        question_indicators = ["?", "what", "how", "why", "when", "where", "who", "can you", "could you", "would you", "do you"]
+        text_lower = text.lower()
+        
+        # If it's a question and mentions the bot name or is in a private chat
+        if any(indicator in text_lower for indicator in question_indicators):
+            # In private chats, respond to all questions
+            if update.effective_chat.type == "private":
+                self.logger.info(f"Question in private chat - triggering immediate response")
+                return True
+            
+            # In group chats, only respond if bot name is mentioned
+            if self._is_bot_mentioned_in_text(text):
+                self.logger.info(f"Question mentioning bot name - triggering immediate response")
+                return True
+        
+        # Check for direct commands or greetings
+        greeting_words = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"]
+        if any(greeting in text_lower for greeting in greeting_words):
+            # Only respond to greetings if bot is mentioned or it's a private chat
+            if update.effective_chat.type == "private":
+                self.logger.info(f"Greeting in private chat - triggering immediate response")
+                return True
+            elif self._is_bot_mentioned_in_text(text):
+                self.logger.info(f"Greeting with bot name mention - triggering immediate response")
+                return True
+        
+        return False
+    
+    async def handle_immediate_response(self, update: Update, context, text: str, username: str) -> None:
+        """
+        Handle immediate response to user messages.
+        """
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if not chat_id:
+            return
+        
+        # Set flag to prevent concurrent periodic responses
+        chat_data = self.chat_history_manager.get_chat_data(chat_id)
+        if chat_data:
+            chat_data.immediate_response_in_progress = True
+        
+        try:
+            # Prepare messages for LLM
+            messages = self.prepare_messages_for_llm(chat_id, include_introduction=True)
+            
+            # Get LLM response
+            response_text = await self.llm_client.get_llm_response(chat_id, messages, for_periodic_job=False)
+            
+            if response_text and not any(response_text.startswith(prefix) for prefix in ["*error", "*system", "*critical"]):
+                # Add @mention if bot was mentioned by name in group chats
+                should_add_mention = (
+                    update.effective_chat.type != "private" and  # Only in group chats
+                    username and username != "Unknown" and  # Valid username available
+                    self._is_bot_mentioned_in_text(text) and  # Bot was mentioned by name
+                    not response_text.startswith(f"@{username}")  # Don't duplicate mentions
+                )
+                
+                if should_add_mention:
+                    response_text = f"@{username} {response_text}"
+                    self.logger.info(f"[ChatID: {chat_id}] Added @mention to immediate response (bot mentioned by name)")
+                
+                # Log outgoing message
+                self.logger.info(f"[ChatID: {chat_id}] Outgoing immediate reply length: {len(response_text)} | Content: {repr(response_text)}")
+                
+                # Send response
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=response_text)
+                except Exception as e:
+                    self.logger.error(f"[ChatID: {chat_id}] Error sending immediate response: {e}")
+                    # Try sending as code block if regular send fails
+                    if len(response_text) < 100:
+                        try:
+                            await context.bot.send_message(chat_id=chat_id, text=f"`{response_text}`", parse_mode="Markdown")
+                        except Exception as e2:
+                            self.logger.error(f"[ChatID: {chat_id}] Error sending immediate response as code block: {e2}")
+                
+                # Add bot response to history
+                self.add_message_to_history(
+                    chat_id=chat_id,
+                    role="assistant",
+                    content=response_text,
+                    user_id=context.bot.id,
+                    username=self.config.bot_username_internal,
+                    is_reply_to_user=True
+                )
+                
+                # Reset activity flag and update last response time since we just responded
+                chat_data = self.chat_history_manager.get_chat_data(chat_id)
+                if chat_data:
+                    chat_data.new_activity_flag = False
+                    chat_data.last_bot_response_time = datetime.now()
+                    chat_data.immediate_response_in_progress = False
+                
+                self.logger.info(f"[ChatID: {chat_id}] Sent immediate response and reset activity flag")
+            elif response_text:
+                self.logger.warning(f"[ChatID: {chat_id}] Immediate LLM returned error: {response_text}")
+            else:
+                self.logger.error(f"[ChatID: {chat_id}] Immediate LLM returned no response")
+                
+        except Exception as e:
+            self.logger.error(f"[ChatID: {chat_id}] Error in immediate response handler: {e}", exc_info=True)
+        finally:
+            # Always clear the flag, even if there was an error
+            chat_data = self.chat_history_manager.get_chat_data(chat_id)
+            if chat_data:
+                chat_data.immediate_response_in_progress = False
+    
+    def _should_add_mention_to_periodic_response(self, chat_id: int, chat_data) -> bool:
+        """
+        Determine if we should add an @mention to a periodic response.
+        Be more conservative to avoid spam.
+        """
+        if not chat_data or not hasattr(chat_data, 'message_history'):
+            return False
+        
+        # Don't add mentions if there was recent bot activity
+        recent_messages = chat_data.message_history[-5:] if len(chat_data.message_history) >= 5 else chat_data.message_history
+        bot_recent_responses = sum(1 for msg in recent_messages if msg.get("role") == "assistant")
+        
+        # If bot has responded recently, don't add mentions
+        if bot_recent_responses >= 2:
+            self.logger.info(f"[ChatID: {chat_id}] Bot has responded recently, skipping @mention")
+            return False
+        
+        # Check if the last few messages were questions or direct interactions
+        last_user_messages = [msg for msg in recent_messages if msg.get("role") == "user"]
+        if not last_user_messages:
+            return False
+        
+        # Look for question indicators or bot mentions in recent messages
+        last_message = last_user_messages[-1] if last_user_messages else None
+        if last_message:
+            content = last_message.get("content", "")
+            
+            # Add mention if recent message was a question or mentioned the bot
+            if ("?" in content.lower() or 
+                any(word in content.lower() for word in ["what", "how", "why", "when", "where", "who"]) or
+                self._is_bot_mentioned_in_text(content)):
+                self.logger.info(f"[ChatID: {chat_id}] Recent message was question/mention, adding @mention")
+                return True
+        
+        # Only add mentions occasionally for general conversation
+        import random
+        if random.random() < 0.3:  # 30% chance for general periodic responses
+            self.logger.info(f"[ChatID: {chat_id}] Random mention for engagement")
+            return True
+        
+        return False
+    
+    def _get_last_active_user_for_mention(self, chat_data) -> str:
+        """
+        Get the username of the last active user for @mention.
+        """
+        if not chat_data or not hasattr(chat_data, 'message_history'):
+            return None
+        
+        # Look for the most recent user message (not bot message)
+        for msg in reversed(chat_data.message_history):
+            if msg.get("role") == "user" and msg.get("username") and msg.get("username") != "Unknown":
+                return msg.get("username")
+        
+        return None
+    
+    def _should_skip_periodic_response(self, chat_data) -> bool:
+        """
+        Determine if we should skip a periodic response to avoid being too chatty.
+        """
+        if not chat_data or not hasattr(chat_data, 'message_history'):
+            return False
+        
+        # Check if bot responded very recently (within last 60 seconds)
+        if hasattr(chat_data, 'last_bot_response_time') and chat_data.last_bot_response_time:
+            time_since_last_response = (datetime.now() - chat_data.last_bot_response_time).total_seconds()
+            if time_since_last_response < 60:  # Skip if bot responded within last minute
+                self.logger.info(f"Bot responded {time_since_last_response:.1f} seconds ago, skipping periodic response")
+                return True
+        
+        # Look at recent message history
+        recent_messages = chat_data.message_history[-10:] if len(chat_data.message_history) >= 10 else chat_data.message_history
+        
+        # Count recent bot responses
+        bot_responses_count = sum(1 for msg in recent_messages if msg.get("role") == "assistant")
+        user_messages_count = sum(1 for msg in recent_messages if msg.get("role") == "user")
+        
+        # If bot has been responding too frequently, skip
+        if bot_responses_count >= user_messages_count and bot_responses_count > 2:
+            return True
+        
+        # Check if the last message was from the bot (avoid consecutive bot messages)
+        if recent_messages and recent_messages[-1].get("role") == "assistant":
+            # Only skip if the bot message was very recent (within last 2 messages)
+            last_two = recent_messages[-2:] if len(recent_messages) >= 2 else recent_messages
+            if all(msg.get("role") == "assistant" for msg in last_two):
+                return True
+        
+        return False
     
 def signal_handler(sig, frame):
     print("Ctrl+C received, shutting down...", flush=True)

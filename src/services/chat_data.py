@@ -9,6 +9,8 @@ class ChatData:
     last_processed_history_len: int = 0
     new_activity_flag: bool = False
     created_at: datetime = field(default_factory=datetime.now)
+    last_bot_response_time: datetime = None
+    immediate_response_in_progress: bool = False
 
 class ChatHistoryManager:
     def __init__(self, history_max_length: int = 20):

@@ -4,7 +4,6 @@ A flexible Telegram bot framework supporting multiple personalities (e.g., Kovu,
 
 ## Features
 - **/start**: Starts periodic LLM-driven responses in the chat (every 30 seconds by default).
-- **/ask [question]**: Directly ask the bot a question and receive an LLM-generated answer.
 - **/draw [prompt]**: Generate an image from a text prompt (uses Modelslab API).
 - **Welcomes new members**: Greets new users joining the chat.
 - **Message history**: Maintains a rolling history of recent messages for context-aware replies.

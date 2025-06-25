@@ -11,9 +11,6 @@ async def handle_start_command(bot: Any, update: Update, context: ContextTypes.D
         await context.bot.send_message(chat_id=chat_id, text=welcome_message)
     bot.logger.info(f"[ChatID: {chat_id}] Sent welcome message for /start command.")
 
-async def handle_ask_command(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # TODO: Implement /ask command logic here or call a method if you add it to TelegramBot
-    pass
 
 async def handle_draw_command(bot: Any, update: Update, context: ContextTypes.DEFAULT_TYPE):
     # TODO: Implement /draw command logic here or call a method if you add it to TelegramBot
@@ -29,8 +26,10 @@ async def handle_text_messages(bot: Any, update: Update, context: ContextTypes.D
     username = update.effective_user.username if update.effective_user else "Unknown"
     text = update.message.text if update.message else ""
     bot.logger.info(f"[ChatID: {chat_id}] Received text message from {username}: {text}")
+    
     if chat_id and user_id:
         bot.add_message_to_history(chat_id, "user", text, user_id, username)
+        
         # Schedule periodic job if not already scheduled
         if hasattr(bot, 'periodic_jobs') and chat_id not in bot.periodic_jobs:
             job = context.job_queue.run_repeating(
@@ -42,4 +41,9 @@ async def handle_text_messages(bot: Any, update: Update, context: ContextTypes.D
             )
             bot.periodic_jobs[chat_id] = job
             bot.logger.info(f"[ChatID: {chat_id}] Scheduled periodic LLM job.")
-    # Optionally, you can trigger a reply or further processing here
+        
+        # Check if bot should respond immediately
+        should_respond_immediately = await bot.should_respond_immediately(update, text)
+        if should_respond_immediately:
+            bot.logger.info(f"[ChatID: {chat_id}] Triggering immediate response")
+            await bot.handle_immediate_response(update, context, text, username)
